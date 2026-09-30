@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
@@ -14,10 +15,10 @@ permissions:
 jobs:
 
   # ============================================================
-  # Python API Tests
+  # FastAPI Application Tests
   # ============================================================
   test:
-    name: Python API Tests
+    name: FastAPI Application Tests
     runs-on: ubuntu-latest
 
     env:
@@ -31,71 +32,122 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
-      - name: Install dependencies
+      - name: Verify requirements file
+        run: |
+          test -f requirements.txt
+          echo "requirements.txt found"
+          cat requirements.txt
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-          if [ -f app/requirements.txt ]; then
-            pip install -r app/requirements.txt
-          fi
-
-          pip install pytest
+          python -m pip install -r requirements.txt
 
       - name: Verify project structure
         run: |
           pwd
-          ls -la
-          ls -la app
+          find app -maxdepth 3 -type f -print
 
       - name: Validate Python syntax
         run: |
           python -m py_compile app/main.py
 
-      - name: Verify Python import
+      - name: Validate FastAPI import
         run: |
-          python -c "from app.main import Handler; print('app.main import successful')"
-
-      - name: Start API
-        run: |
-          python app/main.py > api.log 2>&1 &
-          echo $! > api.pid
-
-      - name: Wait for API
-        run: |
-          for i in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:8080/health > /dev/null; then
-              echo "API is ready"
-              exit 0
-            fi
-
-            echo "Waiting for API..."
-            sleep 1
-          done
-
-          echo "API failed to start"
-          cat api.log || true
-          exit 1
+          python -c "from app.main import app; print('FastAPI app import successful:', app.title)"
 
       - name: Run pytest
         run: |
           python -m pytest -q
 
-      - name: Show API log on failure
+      - name: Start FastAPI application
+        run: |
+          python -m uvicorn app.main:app \
+            --host 127.0.0.1 \
+            --port 8080 \
+            > api.log 2>&1 &
+
+          echo $! > api.pid
+
+      - name: Wait for FastAPI application
+        run: |
+          for i in {1..30}; do
+            if curl \
+              --fail \
+              --silent \
+              http://127.0.0.1:8080/health > /dev/null; then
+
+              echo "FastAPI application is ready"
+              exit 0
+            fi
+
+            echo "Waiting for FastAPI application..."
+            sleep 1
+          done
+
+          echo "FastAPI application failed to start"
+          cat api.log || true
+          exit 1
+
+      - name: Validate health endpoint
+        run: |
+          RESPONSE=$(curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/health)
+
+          echo "Health response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"ok"'
+
+      - name: Validate Swagger UI
+        run: |
+          curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/doc \
+            --output swagger.html
+
+          grep -qi "swagger" swagger.html
+          grep -q "Acme Retail Inventory Management System" swagger.html
+
+          echo "Swagger UI validation passed"
+
+      - name: Validate OpenAPI schema
+        run: |
+          curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/openapi.json \
+            --output openapi.json
+
+          python -c "
+          import json
+
+          with open('openapi.json', encoding='utf-8') as file:
+              schema = json.load(file)
+
+          assert schema['info']['title'] == \
+              'Acme Retail Inventory Management System'
+
+          assert '/health' in schema['paths']
+          assert '/products' in schema['paths']
+
+          print('OpenAPI schema validation passed')
+          "
+
+      - name: Show API logs on failure
         if: failure()
         run: |
-          echo "------ API LOG ------"
+          echo "------ FASTAPI LOG ------"
           cat api.log || true
 
-      - name: Stop API
+      - name: Stop FastAPI application
         if: always()
         run: |
           if [ -f api.pid ]; then
-            kill $(cat api.pid) || true
+            kill "$(cat api.pid)" || true
           fi
 
 
@@ -144,17 +196,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # --------------------------------------------------------
-      # Gitleaks
-      # --------------------------------------------------------
       - name: Gitleaks Secret Scan
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --------------------------------------------------------
-      # Checkov
-      # --------------------------------------------------------
       - name: Checkov Terraform Scan
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -163,9 +209,6 @@ jobs:
           quiet: true
           compact: true
 
-      # --------------------------------------------------------
-      # Trivy Repository Scan
-      # --------------------------------------------------------
       - name: Trivy Filesystem Scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -179,11 +222,12 @@ jobs:
 
 
   # ============================================================
-  # Docker Build + Container Security
+  # Docker Build and Container Security
   # ============================================================
   container:
     name: Docker Build and Security Scan
-    needs: test
+    needs:
+      - test
     runs-on: ubuntu-latest
 
     steps:
@@ -192,16 +236,13 @@ jobs:
 
       - name: Verify Dockerfile
         run: |
-          echo "Checking app/Dockerfile..."
           test -f app/Dockerfile
-          ls -la app
+          echo "Dockerfile found"
+          cat app/Dockerfile
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # IMPORTANT:
-      # load: true loads acme-ims:ci into the runner's Docker daemon.
-      # Trivy can then find and scan the image.
       - name: Build and load Docker image
         uses: docker/build-push-action@v6
         with:
@@ -213,11 +254,8 @@ jobs:
 
       - name: Verify Docker image
         run: |
-          echo "Available Docker images:"
-          docker images
-
-          echo "Checking acme-ims:ci..."
           docker image inspect acme-ims:ci
+          docker images
 
       - name: Start Docker container
         run: |
@@ -226,28 +264,49 @@ jobs:
             -p 8080:8080 \
             acme-ims:ci
 
-          docker ps
+          docker ps -a
 
-      - name: Test container health
+      - name: Wait for container health
         run: |
-          for i in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:8080/health; then
-              echo
-              echo "Container API is healthy"
+          for i in {1..30}; do
+            if curl \
+              --fail \
+              --silent \
+              http://127.0.0.1:8080/health > /dev/null; then
+
+              echo "Containerized FastAPI application is healthy"
               exit 0
             fi
 
-            echo "Waiting for container API..."
-            sleep 1
+            echo "Waiting for containerized application..."
+            sleep 2
           done
 
-          echo "Container API health check failed"
+          echo "Container health check failed"
+          docker ps -a || true
           docker logs acme-ims-test || true
           exit 1
 
-      - name: Show container logs
+      - name: Validate container Swagger UI
+        run: |
+          curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/doc \
+            --output container-swagger.html
+
+          grep -qi "swagger" container-swagger.html
+          grep -q "Acme Retail Inventory Management System" \
+            container-swagger.html
+
+          echo "Container Swagger UI validation passed"
+
+      - name: Show container logs on failure
         if: failure()
         run: |
+          echo "------ CONTAINER STATUS ------"
+          docker ps -a || true
+
           echo "------ CONTAINER LOG ------"
           docker logs acme-ims-test || true
 
@@ -256,9 +315,6 @@ jobs:
         run: |
           docker rm -f acme-ims-test || true
 
-      # --------------------------------------------------------
-      # Trivy Docker Image Scan
-      # --------------------------------------------------------
       - name: Trivy Container Vulnerability Scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
