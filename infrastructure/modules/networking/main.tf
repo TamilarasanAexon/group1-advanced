@@ -46,11 +46,10 @@ resource "aws_subnet" "private" {
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
-
+data "aws_iam_policy_document" "cloudwatch_logs_kms" {
 # checkov:skip=CKV_AWS_109: KMS key policy root-account delegation enables IAM-based administration; resource * means this KMS key in a key policy.
 # checkov:skip=CKV_AWS_111: KMS key policy root-account delegation requires kms:* to retain administrative control of this key.
 # checkov:skip=CKV_AWS_356: In an AWS KMS key policy, Resource "*" refers to this KMS key, not every KMS key.
-data "aws_iam_policy_document" "cloudwatch_logs_kms" {
   statement {
     sid    = "EnableRootAccountPermissions"
     effect = "Allow"
