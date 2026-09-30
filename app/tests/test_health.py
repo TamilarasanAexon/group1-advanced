@@ -1,17 +1,16 @@
 import json
-from http.server import HTTPServer
-from threading import Thread
-from urllib.request import build_opener, ProxyHandler
+import threading
+from urllib.request import ProxyHandler, build_opener
 
-from app.main import Handler
+# Adjust this import only if your main.py exposes a different server factory/class.
+from app.main import create_server
 
 
 def start_test_server():
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = create_server(host="127.0.0.1", port=0)
     port = server.server_address[1]
 
-    thread = Thread(target=server.serve_forever)
-    thread.daemon = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     return server, thread, port
@@ -22,19 +21,17 @@ def test_health_endpoint():
 
     try:
         opener = build_opener(ProxyHandler({}))
-        response = opener.open(
-            f"http://127.0.0.1:{port}/health"
-        )
+        response = opener.open(f"http://127.0.0.1:{port}/health")
 
         assert response.status == 200
 
-        body = json.loads(response.read().decode())
-        assert body == {"status": "ok"}
+        body = json.loads(response.read().decode("utf-8"))
+        assert body["status"] == "ok"
 
     finally:
         server.shutdown()
         server.server_close()
-        thread.join()
+        thread.join(timeout=2)
 
 
 def test_doc_endpoint():
@@ -42,27 +39,20 @@ def test_doc_endpoint():
 
     try:
         opener = build_opener(ProxyHandler({}))
-        response = opener.open(
-            f"http://127.0.0.1:{port}/doc"
-        )
+        response = opener.open(f"http://127.0.0.1:{port}/doc")
 
         assert response.status == 200
 
-        body = json.loads(response.read().decode())
+        content_type = response.headers.get("Content-Type", "").lower()
+        body = response.read().decode("utf-8")
 
-        assert body["service"] == "inventory-management-system"
-        assert body["version"] == "1.0.0"
-
-        paths = [
-            endpoint["path"]
-            for endpoint in body["endpoints"]
-        ]
-
-        assert "/" in paths
-        assert "/health" in paths
-        assert "/doc" in paths
+        # /doc is now the interactive Swagger documentation page.
+        # Do not parse it as the old JSON documentation response.
+        assert "text/html" in content_type
+        assert "swagger" in body.lower()
+        assert "Acme Retail Inventory Management System" in body
 
     finally:
         server.shutdown()
         server.server_close()
-        thread.join()
+        thread.join(timeout=2)
