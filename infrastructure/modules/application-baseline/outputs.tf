@@ -1,4 +1,4 @@
 output "application_name" {
-  description = "Application identifier."
-  value       = "${var.project_name}-${var.environment}"
+  description = "Standardized application name."
+  value       = local.application_name
 }
