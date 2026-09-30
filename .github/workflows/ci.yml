@@ -9,8 +9,11 @@ on:
     branches:
       - main
 
+  workflow_dispatch:
+
 permissions:
   contents: read
+
 
 jobs:
 
@@ -32,12 +35,20 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
-      - name: Verify requirements file
+      - name: Verify project files
         run: |
+          echo "Repository structure:"
+          find app -maxdepth 3 -type f -print
+
+          echo "Checking required files..."
+          test -f app/main.py
+          test -f app/tests/test_health.py
           test -f requirements.txt
-          echo "requirements.txt found"
+
+      - name: Display requirements
+        run: |
+          echo "------ requirements.txt ------"
           cat requirements.txt
 
       - name: Install Python dependencies
@@ -45,14 +56,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Verify project structure
+          # Explicitly install the dependency required by the
+          # current Starlette TestClient implementation.
+          python -m pip install httpx2
+
+      - name: Verify installed dependencies
         run: |
-          pwd
-          find app -maxdepth 3 -type f -print
+          python --version
+          python -m pip show fastapi
+          python -m pip show starlette
+          python -m pip show uvicorn
+          python -m pip show pytest
+          python -m pip show httpx2
 
       - name: Validate Python syntax
         run: |
           python -m py_compile app/main.py
+          python -m py_compile app/tests/test_health.py
 
       - name: Validate FastAPI import
         run: |
@@ -88,7 +108,10 @@ jobs:
           done
 
           echo "FastAPI application failed to start"
+
+          echo "------ FastAPI log ------"
           cat api.log || true
+
           exit 1
 
       - name: Validate health endpoint
@@ -99,7 +122,20 @@ jobs:
             http://127.0.0.1:8080/health)
 
           echo "Health response: $RESPONSE"
+
           echo "$RESPONSE" | grep -q '"status":"ok"'
+
+      - name: Validate root endpoint
+        run: |
+          RESPONSE=$(curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/)
+
+          echo "Root response: $RESPONSE"
+
+          echo "$RESPONSE" \
+            | grep -q '"service":"inventory-management-system"'
 
       - name: Validate Swagger UI
         run: |
@@ -110,7 +146,8 @@ jobs:
             --output swagger.html
 
           grep -qi "swagger" swagger.html
-          grep -q "Acme Retail Inventory Management System" swagger.html
+          grep -q "Acme Retail Inventory Management System" \
+            swagger.html
 
           echo "Swagger UI validation passed"
 
@@ -122,22 +159,28 @@ jobs:
             http://127.0.0.1:8080/openapi.json \
             --output openapi.json
 
-          python -c "
+          python - <<'PY'
           import json
 
-          with open('openapi.json', encoding='utf-8') as file:
+          with open(
+              "openapi.json",
+              encoding="utf-8",
+          ) as file:
               schema = json.load(file)
 
-          assert schema['info']['title'] == \
-              'Acme Retail Inventory Management System'
+          assert (
+              schema["info"]["title"]
+              == "Acme Retail Inventory Management System"
+          )
 
-          assert '/health' in schema['paths']
-          assert '/products' in schema['paths']
+          assert schema["info"]["version"] == "1.0.0"
+          assert "/health" in schema["paths"]
+          assert "/products" in schema["paths"]
 
-          print('OpenAPI schema validation passed')
-          "
+          print("OpenAPI schema validation passed")
+          PY
 
-      - name: Show API logs on failure
+      - name: Show FastAPI logs on failure
         if: failure()
         run: |
           echo "------ FASTAPI LOG ------"
@@ -167,15 +210,24 @@ jobs:
 
       - name: Terraform format check
         run: |
-          terraform -chdir=infrastructure fmt -check -recursive
+          terraform \
+            -chdir=infrastructure \
+            fmt \
+            -check \
+            -recursive
 
-      - name: Terraform init
+      - name: Terraform initialization
         run: |
-          terraform -chdir=infrastructure init -backend=false
+          terraform \
+            -chdir=infrastructure \
+            init \
+            -backend=false
 
-      - name: Terraform validate
+      - name: Terraform validation
         run: |
-          terraform -chdir=infrastructure validate
+          terraform \
+            -chdir=infrastructure \
+            validate
 
 
   # ============================================================
@@ -196,12 +248,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Gitleaks Secret Scan
+      - name: Gitleaks secret scan
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checkov Terraform Scan
+      - name: Checkov Terraform scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: infrastructure
@@ -209,7 +261,7 @@ jobs:
           quiet: true
           compact: true
 
-      - name: Trivy Filesystem Scan
+      - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -228,6 +280,7 @@ jobs:
     name: Docker Build and Security Scan
     needs:
       - test
+
     runs-on: ubuntu-latest
 
     steps:
@@ -237,7 +290,8 @@ jobs:
       - name: Verify Dockerfile
         run: |
           test -f app/Dockerfile
-          echo "Dockerfile found"
+
+          echo "------ app/Dockerfile ------"
           cat app/Dockerfile
 
       - name: Set up Docker Buildx
@@ -283,9 +337,25 @@ jobs:
           done
 
           echo "Container health check failed"
+
+          echo "------ CONTAINER STATUS ------"
           docker ps -a || true
+
+          echo "------ CONTAINER LOG ------"
           docker logs acme-ims-test || true
+
           exit 1
+
+      - name: Validate container health response
+        run: |
+          RESPONSE=$(curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/health)
+
+          echo "Container health response: $RESPONSE"
+
+          echo "$RESPONSE" | grep -q '"status":"ok"'
 
       - name: Validate container Swagger UI
         run: |
@@ -301,9 +371,40 @@ jobs:
 
           echo "Container Swagger UI validation passed"
 
+      - name: Validate container OpenAPI schema
+        run: |
+          curl \
+            --fail \
+            --silent \
+            http://127.0.0.1:8080/openapi.json \
+            --output container-openapi.json
+
+          python - <<'PY'
+          import json
+
+          with open(
+              "container-openapi.json",
+              encoding="utf-8",
+          ) as file:
+              schema = json.load(file)
+
+          assert (
+              schema["info"]["title"]
+              == "Acme Retail Inventory Management System"
+          )
+
+          assert "/health" in schema["paths"]
+          assert "/products" in schema["paths"]
+
+          print("Container OpenAPI validation passed")
+          PY
+
       - name: Show container logs on failure
         if: failure()
         run: |
+          echo "------ DOCKER IMAGES ------"
+          docker images || true
+
           echo "------ CONTAINER STATUS ------"
           docker ps -a || true
 
@@ -315,7 +416,7 @@ jobs:
         run: |
           docker rm -f acme-ims-test || true
 
-      - name: Trivy Container Vulnerability Scan
+      - name: Trivy container vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: acme-ims:ci
