@@ -1,29 +1,39 @@
-data "aws_vpc" "default" {
-  default = true
-}
-
 resource "aws_security_group" "application" {
   name        = "${var.project_name}-${var.environment}-application"
   description = "Application security group"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = var.vpc_id
 
   ingress {
-    description = "Application traffic"
+    description = "Application traffic from the approved CIDR"
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/8"]
+    cidr_blocks = [var.allowed_application_cidr]
   }
 
   egress {
-    description = "Outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS outbound traffic"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = {
-    Name = "${var.project_name}-${var.environment}-application"
+    Name        = "${var.project_name}-${var.environment}-application"
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+resource "aws_network_interface" "application" {
+  subnet_id       = var.subnet_id
+  security_groups = [aws_security_group.application.id]
+  description     = "Application network interface"
+
+  tags = {
+    Name        = "${var.project_name}-${var.environment}-application-eni"
+    Project     = var.project_name
+    Environment = var.environment
   }
 }
