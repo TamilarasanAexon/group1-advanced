@@ -1,9 +1,9 @@
 import json
 import threading
+from http.server import HTTPServer
 from urllib.request import ProxyHandler, build_opener
 
 from app.main import Handler
-from http.server import HTTPServer
 
 
 def start_test_server():
@@ -22,7 +22,7 @@ def start_test_server():
 
 
 def test_health_endpoint():
-    """Verify that the health endpoint returns HTTP 200 and status ok."""
+    """Verify the health endpoint."""
     server, thread, port = start_test_server()
 
     try:
@@ -47,7 +47,7 @@ def test_health_endpoint():
 
 
 def test_doc_endpoint():
-    """Verify that the Swagger documentation page is available."""
+    """Verify the API documentation endpoint."""
     server, thread, port = start_test_server()
 
     try:
@@ -64,11 +64,22 @@ def test_doc_endpoint():
             "",
         ).lower()
 
-        body = response.read().decode("utf-8")
+        assert "application/json" in content_type
 
-        assert "text/html" in content_type
-        assert "swagger" in body.lower()
-        assert "Acme Retail Inventory Management System" in body
+        body = json.loads(
+            response.read().decode("utf-8")
+        )
+
+        assert "name" in body
+        assert "version" in body
+        assert "endpoints" in body
+
+        assert body["name"] == "Group1 Advanced API"
+        assert body["version"] == "1.0"
+
+        assert "/" in body["endpoints"]
+        assert "/health" in body["endpoints"]
+        assert "/doc" in body["endpoints"]
 
     finally:
         server.shutdown()
