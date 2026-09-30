@@ -11,8 +11,7 @@ resource "aws_vpc" "this" {
 }
 
 resource "aws_default_security_group" "this" {
-  vpc_id = aws_vpc.this.id
-
+  vpc_id  = aws_vpc.this.id
   ingress = []
   egress  = []
 
@@ -44,8 +43,8 @@ resource "aws_subnet" "private" {
     Environment = var.environment
   }
 }
-data "aws_caller_identity" "current" {}
 
+data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 data "aws_iam_policy_document" "cloudwatch_logs_kms" {
@@ -54,17 +53,11 @@ data "aws_iam_policy_document" "cloudwatch_logs_kms" {
     effect = "Allow"
 
     principals {
-      type = "AWS"
-
-      identifiers = [
-        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-      ]
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
     }
 
-    actions = [
-      "kms:*"
-    ]
-
+    actions   = ["kms:*"]
     resources = ["*"]
   }
 
@@ -73,11 +66,8 @@ data "aws_iam_policy_document" "cloudwatch_logs_kms" {
     effect = "Allow"
 
     principals {
-      type = "Service"
-
-      identifiers = [
-        "logs.${data.aws_region.current.name}.amazonaws.com"
-      ]
+      type        = "Service"
+      identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]
     }
 
     actions = [
@@ -87,18 +77,32 @@ data "aws_iam_policy_document" "cloudwatch_logs_kms" {
       "kms:GenerateDataKey*",
       "kms:DescribeKey"
     ]
-
     resources = ["*"]
 
     condition {
       test     = "ArnLike"
       variable = "kms:EncryptionContext:aws:logs:arn"
-
-      values = [
-        "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
-      ]
+      values   = ["arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"]
     }
   }
+}
+
+resource "aws_kms_key" "cloudwatch_logs" {
+  description             = "KMS key for VPC flow log encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.cloudwatch_logs_kms.json
+
+  tags = {
+    Name        = "${var.project_name}-${var.environment}-flow-logs-kms"
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+resource "aws_kms_alias" "cloudwatch_logs" {
+  name          = "alias/${var.project_name}-${var.environment}-flow-logs"
+  target_key_id = aws_kms_key.cloudwatch_logs.key_id
 }
 
 resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
@@ -113,37 +117,16 @@ resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
   }
 }
 
-resource "aws_kms_alias" "cloudwatch_logs" {
-  name          = "alias/${var.project_name}-${var.environment}-flow-logs"
-  target_key_id = aws_kms_key.cloudwatch_logs.key_id
-}
-``
-resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
-  name              = "/aws/vpc-flow-logs/${var.project_name}-${var.environment}"
-  retention_in_days = 365 
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-vpc-flow-logs"
-    Project     = var.project_name
-    Environment = var.environment
-  }
-}
-
 data "aws_iam_policy_document" "flow_logs_assume_role" {
   statement {
     effect = "Allow"
 
     principals {
-      type = "Service"
-
-      identifiers = [
-        "vpc-flow-logs.amazonaws.com"
-      ]
+      type        = "Service"
+      identifiers = ["vpc-flow-logs.amazonaws.com"]
     }
 
-    actions = [
-      "sts:AssumeRole"
-    ]
+    actions = ["sts:AssumeRole"]
   }
 }
 
@@ -152,7 +135,6 @@ resource "aws_iam_role" "flow_logs" {
   assume_role_policy = data.aws_iam_policy_document.flow_logs_assume_role.json
 
   tags = {
-    Name        = "${var.project_name}-${var.environment}-vpc-flow-logs"
     Project     = var.project_name
     Environment = var.environment
   }
@@ -161,7 +143,6 @@ resource "aws_iam_role" "flow_logs" {
 data "aws_iam_policy_document" "flow_logs" {
   statement {
     effect = "Allow"
-
     actions = [
       "logs:CreateLogGroup",
       "logs:CreateLogStream",
@@ -169,10 +150,7 @@ data "aws_iam_policy_document" "flow_logs" {
       "logs:DescribeLogStreams",
       "logs:PutLogEvents"
     ]
-
-    resources = [
-      "${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"
-    ]
+    resources = ["${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"]
   }
 }
 
