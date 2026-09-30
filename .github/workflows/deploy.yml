@@ -1,0 +1,114 @@
+name: Deploy Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Container version to deploy, for example v1.0.0"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: tamilarasanaexon/group1-advanced
+  CONTAINER_NAME: acme-ims-dev
+
+jobs:
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+
+    environment:
+      name: dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull release image
+        run: |
+          docker pull \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+
+      - name: Verify release image
+        run: |
+          docker image inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+
+          docker images
+
+      - name: Deploy container
+        run: |
+          docker run -d \
+            --name ${{ env.CONTAINER_NAME }} \
+            --restart unless-stopped \
+            -p 8080:8080 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+
+      - name: Wait for application
+        run: |
+          for i in {1..30}; do
+            if curl --fail --silent \
+              http://127.0.0.1:8080/health > /dev/null; then
+
+              echo "Dev application is healthy"
+              exit 0
+            fi
+
+            echo "Waiting for dev application..."
+            sleep 2
+          done
+
+          echo "Dev deployment health check failed"
+          docker logs ${{ env.CONTAINER_NAME }} || true
+          exit 1
+
+      - name: Verify API
+        run: |
+          echo "Testing root endpoint..."
+          curl --fail http://127.0.0.1:8080/
+
+          echo
+          echo "Testing health endpoint..."
+          curl --fail http://127.0.0.1:8080/health
+
+          echo
+          echo "Testing documentation endpoint..."
+          curl --fail http://127.0.0.1:8080/doc
+
+      - name: Show running container
+        run: |
+          docker ps
+          docker image inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+
+      - name: Deployment summary
+        run: |
+          echo "## Dev Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Environment: dev" >> "$GITHUB_STEP_SUMMARY"
+          echo "Version: ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Health check: PASSED" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          echo "------ DEV CONTAINER LOG ------"
+          docker logs ${{ env.CONTAINER_NAME }} || true
+
+      - name: Clean up dev container
+        if: always()
+        run: |
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
