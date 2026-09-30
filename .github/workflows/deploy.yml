@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Container version to deploy, for example v1.0.0"
+        description: "Image tag to deploy, for example v1.0.0 or latest"
         required: true
-        default: "v1.0.0"
+        default: "latest"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: tamilarasanaexon/group1-advanced
+  IMAGE_NAME: ${{ github.repository }}
   CONTAINER_NAME: acme-ims-dev
 
 jobs:
@@ -26,9 +26,27 @@ jobs:
       name: dev
 
     steps:
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------------
+      # Show deployment configuration
+      # --------------------------------------------------------
+      - name: Show deployment configuration
+        run: |
+          echo "Environment: dev"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Image: ${{ env.IMAGE_NAME }}"
+          echo "Version: ${{ inputs.version }}"
+          echo "Full image:"
+          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
+
+      # --------------------------------------------------------
+      # Login to GitHub Container Registry
+      # --------------------------------------------------------
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -36,63 +54,137 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # --------------------------------------------------------
+      # Pull released image
+      # --------------------------------------------------------
       - name: Pull release image
         run: |
-          docker pull \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
 
+          echo "Pulling image:"
+          echo "$IMAGE"
+
+          docker pull "$IMAGE"
+
+      # --------------------------------------------------------
+      # Verify image exists
+      # --------------------------------------------------------
       - name: Verify release image
         run: |
-          docker image inspect \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
 
+          docker image inspect "$IMAGE"
+
+          echo "Available Docker images:"
           docker images
 
+      # --------------------------------------------------------
+      # Remove previous container if present
+      # --------------------------------------------------------
+      - name: Remove existing dev container
+        run: |
+          docker rm -f "${{ env.CONTAINER_NAME }}" 2>/dev/null || true
+
+      # --------------------------------------------------------
+      # Deploy
+      # --------------------------------------------------------
       - name: Deploy container
         run: |
-          docker run -d \
-            --name ${{ env.CONTAINER_NAME }} \
-            --restart unless-stopped \
-            -p 8080:8080 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
 
-      - name: Wait for application
+          docker run -d \
+            --name "${{ env.CONTAINER_NAME }}" \
+            -p 8080:8080 \
+            "$IMAGE"
+
+      # --------------------------------------------------------
+      # Show container status
+      # --------------------------------------------------------
+      - name: Verify container started
+        run: |
+          docker ps -a
+
+          if ! docker ps \
+            --format '{{.Names}}' \
+            | grep -q "^${{ env.CONTAINER_NAME }}$"; then
+
+            echo "Container failed to start."
+            docker logs "${{ env.CONTAINER_NAME }}" || true
+            exit 1
+          fi
+
+          echo "Container started successfully"
+
+      # --------------------------------------------------------
+      # Health check
+      # --------------------------------------------------------
+      - name: Wait for application health
         run: |
           for i in {1..30}; do
-            if curl --fail --silent \
+
+            if curl \
+              --fail \
+              --silent \
               http://127.0.0.1:8080/health > /dev/null; then
 
               echo "Dev application is healthy"
               exit 0
+
             fi
 
             echo "Waiting for dev application..."
             sleep 2
+
           done
 
           echo "Dev deployment health check failed"
-          docker logs ${{ env.CONTAINER_NAME }} || true
+
+          echo "------ CONTAINER STATUS ------"
+          docker ps -a || true
+
+          echo "------ CONTAINER LOG ------"
+          docker logs "${{ env.CONTAINER_NAME }}" || true
+
           exit 1
 
-      - name: Verify API
+      # --------------------------------------------------------
+      # API verification
+      # --------------------------------------------------------
+      - name: Verify root endpoint
         run: |
-          echo "Testing root endpoint..."
-          curl --fail http://127.0.0.1:8080/
+          curl \
+            --fail \
+            http://127.0.0.1:8080/
 
-          echo
-          echo "Testing health endpoint..."
-          curl --fail http://127.0.0.1:8080/health
-
-          echo
-          echo "Testing documentation endpoint..."
-          curl --fail http://127.0.0.1:8080/doc
-
-      - name: Show running container
+      - name: Verify health endpoint
         run: |
+          curl \
+            --fail \
+            http://127.0.0.1:8080/health
+
+      - name: Verify documentation endpoint
+        run: |
+          curl \
+            --fail \
+            http://127.0.0.1:8080/doc
+
+      # --------------------------------------------------------
+      # Deployment information
+      # --------------------------------------------------------
+      - name: Show deployment information
+        run: |
+          echo "Running containers:"
           docker ps
-          docker image inspect \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
+          echo ""
+          echo "Deployed image:"
+          docker inspect \
+            --format='{{.Config.Image}}' \
+            "${{ env.CONTAINER_NAME }}"
+
+      # --------------------------------------------------------
+      # GitHub deployment summary
+      # --------------------------------------------------------
       - name: Deployment summary
         run: |
           echo "## Dev Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
@@ -100,15 +192,29 @@ jobs:
           echo "Environment: dev" >> "$GITHUB_STEP_SUMMARY"
           echo "Version: ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Health check: PASSED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Health endpoint: PASSED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Root endpoint: PASSED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Documentation endpoint: PASSED" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Show container logs on failure
+      # --------------------------------------------------------
+      # Troubleshooting information
+      # --------------------------------------------------------
+      - name: Show logs on failure
         if: failure()
         run: |
-          echo "------ DEV CONTAINER LOG ------"
-          docker logs ${{ env.CONTAINER_NAME }} || true
+          echo "------ DOCKER IMAGES ------"
+          docker images || true
 
+          echo "------ CONTAINER STATUS ------"
+          docker ps -a || true
+
+          echo "------ CONTAINER LOG ------"
+          docker logs "${{ env.CONTAINER_NAME }}" || true
+
+      # --------------------------------------------------------
+      # GitHub runners are temporary, so clean up test deployment
+      # --------------------------------------------------------
       - name: Clean up dev container
         if: always()
         run: |
-          docker rm -f ${{ env.CONTAINER_NAME }} || true
+          docker rm -f "${{ env.CONTAINER_NAME }}" || true
