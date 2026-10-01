@@ -182,4 +182,99 @@ jobs:
         run: |
           curl \
             --fail \
-  
+            --silent \
+            --show-error \
+            http://127.0.0.1:8080/
+
+          echo
+          echo "Root endpoint PASSED"
+
+      - name: Validate health endpoint
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:8080/health
+
+          echo
+          echo "Health endpoint PASSED"
+
+      - name: Validate OpenAPI endpoint
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:8080/openapi.json \
+            > /dev/null
+
+          echo "OpenAPI endpoint PASSED"
+
+
+      # =====================================================
+      # 10. CONTAINER LOGS
+      # =====================================================
+      - name: Display release container logs
+        if: always()
+        run: |
+          docker logs acme-ims-release || true
+
+
+      # =====================================================
+      # 11. CLEAN UP TEST CONTAINER
+      # =====================================================
+      - name: Stop release validation container
+        if: always()
+        run: |
+          docker rm --force acme-ims-release || true
+
+
+      # =====================================================
+      # 12. TRIVY SECURITY SCAN
+      # =====================================================
+      - name: Run Trivy release image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_DISABLE_VEX_NOTICE: "true"
+
+        with:
+          version: "v0.74.0"
+
+          scan-type: "image"
+
+          image-ref: "acme-ims:release"
+
+          scanners: "vuln"
+
+          vuln-type: "os,library"
+
+          format: "table"
+
+          severity: "HIGH,CRITICAL"
+
+          ignore-unfixed: true
+
+          exit-code: "1"
+
+          skip-files: "**/pip/_vendor/bom.cdx.json"
+
+
+      # =====================================================
+      # 13. RELEASE SUMMARY
+      # =====================================================
+      - name: Release validation completed
+        run: |
+          echo "========================================="
+          echo "RELEASE VALIDATION SUCCESSFUL"
+          echo "========================================="
+          echo "Environment      : ${{ inputs.environment }}"
+          echo "Docker image     : acme-ims:release"
+          echo "Commit image     : acme-ims:${{ github.sha }}"
+          echo "Docker build     : PASSED"
+          echo "Container health : PASSED"
+          echo "Root endpoint    : PASSED"
+          echo "Health endpoint  : PASSED"
+          echo "OpenAPI endpoint : PASSED"
+          echo "Trivy scan       : PASSED"
+          echo "========================================="
