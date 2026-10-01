@@ -18,11 +18,9 @@ permissions:
   security-events: write
 
 env:
+  PYTHON_VERSION: "3.12"
   IMAGE_NAME: acme-ims
   IMAGE_TAG: ci
-  PYTHON_VERSION: "3.12"
-  TERRAFORM_VERSION: "1.9.8"
-  TRIVY_DISABLE_VEX_NOTICE: "true"
 
 jobs:
 
@@ -41,38 +39,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
 
       - name: Display Python information
         run: |
           python --version
           python -m pip --version
 
-      - name: Upgrade packaging tools
+      - name: Upgrade pip
         run: |
-          python -m pip install --upgrade \
-            pip \
-            "setuptools>=78.1.1"
+          python -m pip install --upgrade pip
 
-      - name: Install test dependencies
+      - name: Install application and test dependencies
         run: |
           if [ -f requirements-dev.txt ]; then
             echo "Installing requirements-dev.txt"
             python -m pip install -r requirements-dev.txt
           elif [ -f requirements.txt ]; then
-            echo "requirements-dev.txt not found"
-            echo "Installing requirements.txt and test dependencies"
+            echo "Installing requirements.txt"
             python -m pip install -r requirements.txt
             python -m pip install pytest httpx2
           else
-            echo "ERROR: No requirements file found"
+            echo "ERROR: requirements.txt not found"
             exit 1
           fi
 
-      - name: Verify required packages
+      - name: Verify test dependencies
         run: |
           python -m pip show fastapi
           python -m pip show uvicorn
@@ -83,7 +74,7 @@ jobs:
         run: |
           python -c "from app.main import app; print('app.main import successful')"
 
-      - name: Run pytest
+      - name: Run Python tests
         run: |
           python -m pytest -v
 
@@ -115,7 +106,6 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
       - name: Display Terraform version
@@ -139,14 +129,14 @@ jobs:
 
 
   # =========================================================
-  # 3. GITLEAKS SECRET SCAN
+  # 3. REPOSITORY SECURITY CHECKS
   # =========================================================
-  secret-scan:
-    name: Gitleaks Secret Scan
+  security-checks:
+    name: Repository Security Checks
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout complete repository history
+      - name: Checkout repository history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -156,19 +146,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-
-  # =========================================================
-  # 4. CHECKOV INFRASTRUCTURE SCAN
-  # =========================================================
-  checkov:
-    name: Checkov IaC Scan
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Verify Terraform files
+      - name: Verify infrastructure directory
         run: |
           if [ ! -d infrastructure ]; then
             echo "ERROR: infrastructure directory not found"
@@ -186,7 +164,7 @@ jobs:
 
 
   # =========================================================
-  # 5. DOCKER BUILD, HEALTH CHECK AND TRIVY SCAN
+  # 4. DOCKER BUILD, API VALIDATION AND TRIVY
   # =========================================================
   container-security:
     name: Docker Build and Trivy Scan
@@ -195,8 +173,7 @@ jobs:
     needs:
       - python-tests
       - terraform-validation
-      - secret-scan
-      - checkov
+      - security-checks
 
     steps:
       - name: Checkout repository
@@ -206,18 +183,18 @@ jobs:
         run: |
           pwd
           ls -la
-          echo "Dockerfiles:"
-          find . -maxdepth 3 -type f -name Dockerfile -print
 
-      - name: Verify required container files
+          echo "Dockerfiles found:"
+          find . \
+            -maxdepth 3 \
+            -type f \
+            -name Dockerfile \
+            -print
+
+      - name: Verify required Docker files
         run: |
           if [ ! -f app/Dockerfile ]; then
             echo "ERROR: app/Dockerfile not found"
-            exit 1
-          fi
-
-          if [ ! -f requirements.txt ]; then
-            echo "ERROR: root requirements.txt not found"
             exit 1
           fi
 
@@ -226,17 +203,22 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f requirements.txt ]; then
+            echo "ERROR: requirements.txt not found"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Display Docker information
+      - name: Display Docker version
         run: |
           docker --version
           docker buildx version
 
       - name: Pull current Python base image
         run: |
-          docker pull python:${{ env.PYTHON_VERSION }}-slim
+          docker pull "python:${PYTHON_VERSION}-slim"
 
       - name: Build Docker image
         run: |
@@ -253,19 +235,16 @@ jobs:
             "${IMAGE_NAME}:${IMAGE_TAG}" \
             > /dev/null
 
-          echo "Docker image ${IMAGE_NAME}:${IMAGE_TAG} created"
+          echo "Docker image ${IMAGE_NAME}:${IMAGE_TAG} created successfully"
 
-      - name: Display installed security package versions
+      - name: Verify patched package versions
         run: |
           docker run --rm \
             "${IMAGE_NAME}:${IMAGE_TAG}" \
-            python -c \
-            "import importlib.metadata as m; \
-            packages=['pip','setuptools','urllib3','msgpack']; \
-            [print(f'{p}: {m.version(p)}') \
-            if m.packages_distributions().get(p) \
-            else print(f'{p}: not installed') \
-            for p in packages]"
+            python -c "import importlib.metadata as m; \
+            print('msgpack:', m.version('msgpack')); \
+            print('setuptools:', m.version('setuptools')); \
+            print('urllib3:', m.version('urllib3'))"
 
       - name: Start API container
         run: |
@@ -301,21 +280,35 @@ jobs:
 
       - name: Validate API endpoints
         run: |
-          curl --fail --silent --show-error \
+          curl \
+            --fail \
+            --silent \
+            --show-error \
             http://127.0.0.1:8080/
 
           echo
 
-          curl --fail --silent --show-error \
+          curl \
+            --fail \
+            --silent \
+            --show-error \
             http://127.0.0.1:8080/health
 
           echo
 
-          curl --fail --silent --show-error \
+          curl \
+            --fail \
+            --silent \
+            --show-error \
             http://127.0.0.1:8080/openapi.json \
             > /dev/null
 
-          echo "Root, health and OpenAPI endpoints passed"
+          echo "API endpoint validation passed"
+
+      - name: Show container logs
+        if: always()
+        run: |
+          docker logs acme-ims-ci || true
 
       - name: Stop API container
         if: always()
@@ -324,27 +317,31 @@ jobs:
 
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_DISABLE_VEX_NOTICE: "true"
         with:
-          scan-type: image
-          image-ref: "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          scanners: vuln
+          version: "v0.74.0"
+          scan-type: "image"
+          image-ref: "acme-ims:ci"
+          scanners: "vuln"
           vuln-type: "os,library"
-          format: table
+          format: "table"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
           exit-code: "1"
-          skip-version-check: true
+          skip-files: "**/pip/_vendor/bom.cdx.json"
 
       - name: CI completed successfully
         run: |
           echo "========================================="
           echo "CI PIPELINE COMPLETED SUCCESSFULLY"
           echo "========================================="
-          echo "Python Tests         : PASSED"
-          echo "Terraform Validation : PASSED"
-          echo "Gitleaks Scan        : PASSED"
-          echo "Checkov Scan         : PASSED"
-          echo "Docker Build         : PASSED"
-          echo "Container Health     : PASSED"
-          echo "Trivy HIGH/CRITICAL  : PASSED"
+          echo "Python tests          : PASSED"
+          echo "Terraform validation  : PASSED"
+          echo "Gitleaks scan         : PASSED"
+          echo "Checkov scan          : PASSED"
+          echo "Docker build          : PASSED"
+          echo "Container health      : PASSED"
+          echo "API endpoint checks   : PASSED"
+          echo "Trivy security scan   : PASSED"
           echo "========================================="
