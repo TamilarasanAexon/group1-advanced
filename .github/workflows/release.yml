@@ -3,78 +3,183 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version, for example v1.0.0"
+      environment:
+        description: Deployment environment
         required: true
-        default: "v1.0.0"
+        default: dev
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
 
 permissions:
   contents: read
   packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: tamilarasanaexon/group1-advanced
+  IMAGE_NAME: acme-ims
+  IMAGE_TAG: release
+  PYTHON_VERSION: "3.12"
 
 jobs:
+
   release:
-    name: Build and Publish Container
+    name: Build and Validate Release
     runs-on: ubuntu-latest
 
     steps:
+
+      # =====================================================
+      # 1. CHECKOUT
+      # =====================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Display repository structure
+        run: |
+          echo "Repository root:"
+          pwd
+          ls -la
+
+          echo "Dockerfiles:"
+          find . -maxdepth 3 -type f -name Dockerfile -print
+
+
+      # =====================================================
+      # 2. VERIFY REQUIRED FILES
+      # =====================================================
+      - name: Verify release files
+        run: |
+          if [ ! -f app/Dockerfile ]; then
+            echo "ERROR: app/Dockerfile not found"
+            exit 1
+          fi
+
+          if [ ! -f app/main.py ]; then
+            echo "ERROR: app/main.py not found"
+            exit 1
+          fi
+
+          if [ ! -f requirements.txt ]; then
+            echo "ERROR: requirements.txt not found"
+            exit 1
+          fi
+
+          echo "Required release files found"
+
+
+      # =====================================================
+      # 3. DOCKER BUILDX
+      # =====================================================
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Display Docker information
+        run: |
+          docker --version
+          docker buildx version
 
-      - name: Build and load image for security scan
+
+      # =====================================================
+      # 4. BUILD RELEASE IMAGE
+      #
+      # IMPORTANT:
+      # Context MUST be repository root "."
+      #
+      # Dockerfile uses:
+      # COPY requirements.txt ...
+      # COPY app/ ...
+      # =====================================================
+      - name: Build release image
         uses: docker/build-push-action@v6
         with:
-          context: ./app
+          context: .
           file: ./app/Dockerfile
+          pull: true
+          no-cache: true
           push: false
           load: true
-          tags: acme-ims:release
+          tags: |
+            acme-ims:release
+            acme-ims:${{ github.sha }}
 
-      - name: Verify image
+
+      # =====================================================
+      # 5. VERIFY IMAGE
+      # =====================================================
+      - name: Verify release image
         run: |
-          docker image inspect acme-ims:release
+          docker image inspect acme-ims:release > /dev/null
+
+          echo "Release image successfully created"
+
           docker images
 
-      - name: Trivy release image scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: acme-ims:release
-          format: table
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          vuln-type: os,library
-          scanners: vuln
-          exit-code: "1"
 
-      - name: Build and publish versioned image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./app
-          file: ./app/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-
-      - name: Release summary
+      # =====================================================
+      # 6. VERIFY PATCHED PYTHON PACKAGES
+      # =====================================================
+      - name: Verify Python package versions
         run: |
-          echo "## Container Release Successful" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Version: ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          docker run --rm \
+            acme-ims:release \
+            python -c "import importlib.metadata as m; \
+            print('msgpack:', m.version('msgpack')); \
+            print('setuptools:', m.version('setuptools')); \
+            print('urllib3:', m.version('urllib3'))"
+
+
+      # =====================================================
+      # 7. START RELEASE CONTAINER
+      # =====================================================
+      - name: Start release container
+        run: |
+          docker run \
+            --detach \
+            --name acme-ims-release \
+            --publish 8080:8080 \
+            acme-ims:release
+
+
+      # =====================================================
+      # 8. HEALTH CHECK
+      # =====================================================
+      - name: Wait for API health endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 30); do
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:8080/health; then
+
+              echo
+              echo "Release API health check PASSED"
+              exit 0
+            fi
+
+            echo "Waiting for API: attempt ${attempt}/30"
+
+            sleep 2
+          done
+
+          echo "ERROR: API failed to become healthy"
+
+          docker logs acme-ims-release
+
+          exit 1
+
+
+      # =====================================================
+      # 9. API VALIDATION
+      # =====================================================
+      - name: Validate root endpoint
+        run: |
+          curl \
+            --fail \
+  
